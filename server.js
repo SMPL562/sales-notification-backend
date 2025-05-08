@@ -1,7 +1,25 @@
 const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
 app.use(express.json());
+
+// Store connected WebSocket clients
+const clients = new Set();
+
+// WebSocket connection handling
+wss.on('connection', (ws) => {
+  console.log('New WebSocket client connected');
+  clients.add(ws);
+
+  ws.on('close', () => {
+    console.log('WebSocket client disconnected');
+    clients.delete(ws);
+  });
+});
 
 // Webhook endpoint to receive sale data
 app.post('/webhook', (req, res) => {
@@ -13,11 +31,20 @@ app.post('/webhook', (req, res) => {
 
   console.log('Received sale data:', { bdeName, product, managerName });
 
+  const saleData = { bdeName, product, managerName };
+
+  // Broadcast sale data to all connected clients
+  clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(saleData));
+    }
+  });
+
   res.status(200).json({ message: 'Webhook received successfully' });
 });
 
 // Start the server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
