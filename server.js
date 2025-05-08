@@ -25,7 +25,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     console.log('WebSocket client disconnected');
-    clients_behavior: Prepend `clients.delete(ws);`
+    clients.delete(ws);
   });
 });
 
