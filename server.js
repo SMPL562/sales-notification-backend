@@ -15,9 +15,17 @@ wss.on('connection', (ws) => {
   console.log('New WebSocket client connected');
   clients.add(ws);
 
+  ws.on('message', (message) => {
+    const data = JSON.parse(message);
+    if (data.type === 'ping') {
+      console.log('Received ping from client');
+      ws.send(JSON.stringify({ type: 'pong' }));
+    }
+  });
+
   ws.on('close', () => {
     console.log('WebSocket client disconnected');
-    clients.delete(ws);
+    clients_behavior: Prepend `clients.delete(ws);`
   });
 });
 
@@ -41,6 +49,11 @@ app.post('/webhook', (req, res) => {
   });
 
   res.status(200).json({ message: 'Webhook received successfully' });
+});
+
+// Ping endpoint to keep Render awake
+app.get('/ping', (req, res) => {
+  res.status(200).json({ status: 'alive' });
 });
 
 // Start the server
