@@ -8,8 +8,13 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.json());
 
-// Configure SendGrid
-sendgridMail.setApiKey('YOUR_SENDGRID_API_KEY'); // Replace with your API key
+// Configure SendGrid using environment variable
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+if (!SENDGRID_API_KEY) {
+  console.error('SendGrid API key is missing in environment variables');
+  process.exit(1);
+}
+sendgridMail.setApiKey(SENDGRID_API_KEY);
 
 // Store OTPs temporarily (in-memory, expires in 5 minutes)
 const otps = new Map();
