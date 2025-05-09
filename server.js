@@ -7,24 +7,19 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.json());
 
-// Store connected WebSocket clients
-const clients = new Set();
-
 // WebSocket connection handling
+const clients = new Set();
 wss.on('connection', (ws) => {
-  console.log('New WebSocket client connected');
   clients.add(ws);
 
   ws.on('message', (message) => {
     const data = JSON.parse(message);
     if (data.type === 'ping') {
-      console.log('Received ping from client');
       ws.send(JSON.stringify({ type: 'pong' }));
     }
   });
 
   ws.on('close', () => {
-    console.log('WebSocket client disconnected');
     clients.delete(ws);
   });
 });
@@ -37,11 +32,13 @@ app.post('/webhook', (req, res) => {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  console.log('Received sale data:', { bdeName, product, managerName });
+  const saleData = {
+    bdeName,
+    product,
+    managerName,
+    messageId: Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9) // Unique message ID
+  };
 
-  const saleData = { bdeName, product, managerName };
-
-  // Broadcast sale data to all connected clients
   clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify(saleData));
