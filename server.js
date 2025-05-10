@@ -4,6 +4,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const sendgridMail = require('@sendgrid/mail');
 const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -46,7 +47,7 @@ wss.on('connection', (ws) => {
 
 // Webhook endpoint to receive sale data
 app.post('/webhook', (req, res) => {
-  const { type, bdeName, product, managerName, message } = req.body;
+  const { type, bdeName, product, managerName, message, email } = req.body;
 
   if (!type) {
     return res.status(400).json({ error: 'Missing type field' });
@@ -73,6 +74,16 @@ app.post('/webhook', (req, res) => {
       message,
       messageId: Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9)
     };
+  } else if (type === 'private') {
+    if (!email || !message) {
+      return res.status(400).json({ error: 'Missing email or message field for private type' });
+    }
+    saleData = {
+      type: 'private',
+      email,
+      message,
+      messageId: Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9)
+    };
   } else {
     return res.status(400).json({ error: 'Invalid type' });
   }
@@ -83,7 +94,7 @@ app.post('/webhook', (req, res) => {
     }
   });
 
-  console.log('Webhook received:', { type, bdeName, product, managerName, message });
+  console.log('Webhook received:', { type, bdeName, product, managerName, message, email });
   res.status(200).json({ message: 'Webhook received successfully' });
 });
 
@@ -130,8 +141,9 @@ app.post('/verify-otp', (req, res) => {
   }
 
   otps.delete(email);
-  console.log(`OTP verified for ${email}`);
-  res.status(200).json({ message: 'OTP verified successfully', token: email });
+  const token = uuidv4();
+  console.log(`OTP verified for ${email}, token: ${token}`);
+  res.status(200).json({ message: 'OTP verified successfully', token, email });
 });
 
 // Start the server
