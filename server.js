@@ -9,7 +9,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(express.json());
-app.use(cors()); // Enable CORS for all routes
+app.use(cors());
 
 // Configure SendGrid using environment variable
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
@@ -110,9 +110,11 @@ app.post('/request-otp', (req, res) => {
 
   sendgridMail.send(msg)
     .then(() => {
+      console.log(`OTP sent successfully to ${email}`);
       res.status(200).json({ message: 'OTP sent successfully' });
     })
     .catch((error) => {
+      console.error('Failed to send OTP:', error.response ? error.response.body : error.message);
       res.status(500).json({ error: 'Failed to send OTP' });
     });
 });
@@ -127,6 +129,7 @@ app.post('/verify-otp', (req, res) => {
   }
 
   otps.delete(email);
+  console.log(`OTP verified for ${email}`);
   res.status(200).json({ message: 'OTP verified successfully', token: email });
 });
 
