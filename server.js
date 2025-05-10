@@ -1,12 +1,15 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const sendgridMail = require('@sendgrid/mail');
+const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(express.json());
+app.use(cors()); // Enable CORS for all routes
 
 // Configure SendGrid using environment variable
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
