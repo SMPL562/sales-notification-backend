@@ -83,6 +83,7 @@ app.post('/webhook', (req, res) => {
     }
   });
 
+  console.log('Webhook received:', { type, bdeName, product, managerName, message });
   res.status(200).json({ message: 'Webhook received successfully' });
 });
 
@@ -103,7 +104,7 @@ app.post('/request-otp', (req, res) => {
 
   const msg = {
     to: email,
-    from: 'noreply@codingninjas.com', // Replace with your verified sender
+    from: 'noreply@codingninjas.com',
     subject: 'Your OTP for Sales Notification Extension',
     text: `Your OTP is ${otp}. It expires in 5 minutes.`,
   };
