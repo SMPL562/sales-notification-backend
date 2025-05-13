@@ -54,6 +54,9 @@ app.use('/verify-otp', limiter);
 const connectionsPerIp = new Map();
 const MAX_CONNECTIONS_PER_IP = 5;
 
+// Cooldown period (in milliseconds)
+const COOLDOWN_PERIOD = 30000; // 30 seconds
+
 // Middleware to validate token (Bearer token in Authorization header)
 const validateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -95,7 +98,7 @@ function generateOTP() {
 }
 
 // WebSocket connection handling
-const clients = new Map(); // Map to store authenticated clients
+const clients = new Map(); // Map to store authenticated clients with their state
 
 wss.on('connection', (ws, req) => {
   // Validate Origin header
@@ -122,13 +125,40 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // Store client with token
-  clients.set(ws, { token });
+  // Store client with token, queue, and last sent time
+  clients.set(ws, {
+    token,
+    queue: [], // Queue for pending notifications
+    lastSentTime: 0 // Timestamp of the last sent notification
+  });
 
   ws.on('message', (message) => {
     const data = JSON.parse(message);
     if (data.type === 'ping') {
       ws.send(JSON.stringify({ type: 'pong' }));
+    } else if (data.type === 'requestNextNotification') {
+      // Client requests the next notification after cooldown
+      const clientData = clients.get(ws);
+      if (!clientData) return;
+
+      const currentTime = Date.now();
+      // Check if the client is still in cooldown
+      if (currentTime - clientData.lastSentTime < COOLDOWN_PERIOD) {
+        // Still in cooldown, client should wait
+        ws.send(JSON.stringify({ type: 'wait', remaining: COOLDOWN_PERIOD - (currentTime - clientData.lastSentTime) }));
+        return;
+      }
+
+      // Send the next notification from the queue
+      if (clientData.queue.length > 0) {
+        const nextNotification = clientData.queue.shift();
+        ws.send(JSON.stringify(nextNotification));
+        clientData.lastSentTime = Date.now();
+        console.log(`Sent queued notification to client:`, nextNotification);
+      } else {
+        // No notifications in queue
+        ws.send(JSON.stringify({ type: 'noNotifications' }));
+      }
     }
   });
 
@@ -188,7 +218,18 @@ app.post('/webhook', validateWebhookToken, (req, res) => {
 
   clients.forEach((clientData, client) => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify(saleData));
+      const currentTime = Date.now();
+      // Check if the client is in cooldown
+      if (currentTime - clientData.lastSentTime < COOLDOWN_PERIOD) {
+        // Client is in cooldown, queue the notification
+        clientData.queue.push(saleData);
+        console.log(`Notification queued for client:`, saleData);
+      } else {
+        // Client is not in cooldown, send immediately
+        client.send(JSON.stringify(saleData));
+        clientData.lastSentTime = currentTime;
+        console.log(`Notification sent to client:`, saleData);
+      }
     }
   });
 
