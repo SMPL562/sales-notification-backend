@@ -8,6 +8,10 @@ const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
+
+// Enable trust proxy to handle X-Forwarded-For header correctly
+app.set('trust proxy', true);
+
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -60,7 +64,7 @@ const validateToken = (req, res, next) => {
   if (!token || !validateTokenFormat(token)) {
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
-  req.authToken = token; // Store token for potential use
+  req.authToken = token;
   next();
 };
 
@@ -234,7 +238,15 @@ app.post('/request-otp', (req, res, next) => {
 });
 
 // Verify OTP
-app.post('/verify-otp', validateToken, (req, res) => {
+app.post('/verify-otp', (req, res, next) => {
+  // Allow first-time OTP verification without a token
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    validateToken(req, res, next);
+  } else {
+    next();
+  }
+}, (req, res) => {
   const { email, otp } = req.body;
   const stored = otps.get(email);
 
