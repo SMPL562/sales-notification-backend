@@ -51,7 +51,8 @@ app.use('/request-otp', limiter);
 app.use('/verify-otp', limiter);
 
 // Track WebSocket connections per token
-const connectionsPerToken = new Map();
+const connectionsPerToken = new Map(); // Maps token to WebSocket instance
+const clients = new Map(); // Maps WebSocket instance to client data
 const MAX_CONNECTIONS_PER_TOKEN = 1; // Limit to 1 connection per user token
 
 // Cooldown period (in milliseconds)
@@ -98,8 +99,6 @@ function generateOTP() {
 }
 
 // WebSocket connection handling
-const clients = new Map(); // Map to store authenticated clients with their state
-
 wss.on('connection', (ws, req) => {
   // Validate Origin header
   const origin = req.headers.origin;
@@ -116,18 +115,20 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // Rate limit WebSocket connections by token
-  const ip = req.ip; // Log IP for debugging
+  // Log client IP using X-Forwarded-For header
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   console.log(`WebSocket connection attempt with token: ${token}, IP: ${ip}`);
-  const connectionCount = connectionsPerToken.get(token) || 0;
-  if (connectionCount >= MAX_CONNECTIONS_PER_TOKEN) {
-    console.log(`Too many WebSocket connections for token: ${token}`);
-    ws.close(1008, 'Too many connections for this user');
-    return;
-  }
-  connectionsPerToken.set(token, connectionCount + 1);
 
-  // Store client with token, queue, and last sent time
+  // Check if there's an existing connection for this token
+  const existingWs = connectionsPerToken.get(token);
+  if (existingWs) {
+    console.log(`Existing connection found for token: ${token}. Closing old connection.`);
+    existingWs.close(1000, 'Replaced by new connection');
+    // The 'close' event will handle cleanup
+  }
+
+  // Add the new connection
+  connectionsPerToken.set(token, ws);
   clients.set(ws, {
     token,
     queue: [], // Queue for pending notifications
@@ -166,13 +167,10 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     clients.delete(ws);
-    const newCount = (connectionsPerToken.get(token) || 1) - 1;
-    if (newCount <= 0) {
+    if (connectionsPerToken.get(token) === ws) {
       connectionsPerToken.delete(token);
-    } else {
-      connectionsPerToken.set(token, newCount);
     }
-    console.log(`WebSocket disconnected for token: ${token}, IP: ${ip}, remaining connections: ${newCount}`);
+    console.log(`WebSocket disconnected for token: ${token}, IP: ${ip}`);
   });
 });
 
@@ -285,7 +283,7 @@ app.post('/request-otp', (req, res, next) => {
 
 // Verify OTP
 app.post('/verify-otp', (req, res, next) => {
-  // Allow first-time OTP verification without a token
+  console.log(`Verify-OTP from IP: ${req.ip}`);
   const authHeader = req.headers['authorization'];
   if (authHeader && authHeader.startsWith('Bearer ')) {
     validateToken(req, res, next);
