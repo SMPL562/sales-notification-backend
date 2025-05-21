@@ -53,7 +53,11 @@ app.use('/verify-otp', limiter);
 // Track WebSocket connections per token
 const connectionsPerToken = new Map(); // Maps token to WebSocket instance
 const clients = new Map(); // Maps WebSocket instance to client data
+const lastConnectionTime = new Map(); // Maps token to last connection timestamp
+const lastPingTime = new Map(); // Maps token to last ping timestamp
 const MAX_CONNECTIONS_PER_TOKEN = 1; // Limit to 1 connection per user token
+const MIN_CONNECTION_INTERVAL = 30000; // Minimum interval between connections (30 seconds)
+const MIN_PING_INTERVAL = 30000; // Minimum interval between pings (30 seconds)
 
 // Cooldown period (in milliseconds)
 const COOLDOWN_PERIOD = 30000; // 30 seconds
@@ -119,6 +123,15 @@ wss.on('connection', (ws, req) => {
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   console.log(`WebSocket connection attempt with token: ${token}, IP: ${ip}`);
 
+  // Throttle connection attempts: Check the last connection time for this token
+  const lastConnTime = lastConnectionTime.get(token) || 0;
+  const currentTime = Date.now();
+  if (currentTime - lastConnTime < MIN_CONNECTION_INTERVAL) {
+    console.log(`Connection attempt too soon for token: ${token}. Ignoring.`);
+    ws.close(1008, 'Connection attempt too soon');
+    return;
+  }
+
   // Check if there's an existing connection for this token
   const existingWs = connectionsPerToken.get(token);
   if (existingWs) {
@@ -127,7 +140,8 @@ wss.on('connection', (ws, req) => {
     // The 'close' event will handle cleanup
   }
 
-  // Add the new connection
+  // Update the last connection time and add the new connection
+  lastConnectionTime.set(token, currentTime);
   connectionsPerToken.set(token, ws);
   clients.set(ws, {
     token,
@@ -138,6 +152,14 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (message) => {
     const data = JSON.parse(message);
     if (data.type === 'ping') {
+      // Throttle pings: Check the last ping time for this token
+      const lastPing = lastPingTime.get(token) || 0;
+      const now = Date.now();
+      if (now - lastPing < MIN_PING_INTERVAL) {
+        console.log(`Ping received too soon for token: ${token}. Ignoring.`);
+        return;
+      }
+      lastPingTime.set(token, now);
       ws.send(JSON.stringify({ type: 'pong' }));
     } else if (data.type === 'requestNextNotification') {
       // Client requests the next notification after cooldown
