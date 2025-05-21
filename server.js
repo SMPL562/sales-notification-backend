@@ -9,8 +9,8 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-// Enable trust proxy to handle X-Forwarded-For header correctly
-app.set('trust proxy', true);
+// Set trust proxy to 1 to trust the closest proxy (Render)
+app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -50,9 +50,9 @@ const limiter = rateLimit({
 app.use('/request-otp', limiter);
 app.use('/verify-otp', limiter);
 
-// Track WebSocket connections per IP
-const connectionsPerIp = new Map();
-const MAX_CONNECTIONS_PER_IP = 5;
+// Track WebSocket connections per token
+const connectionsPerToken = new Map();
+const MAX_CONNECTIONS_PER_TOKEN = 1; // Limit to 1 connection per user token
 
 // Cooldown period (in milliseconds)
 const COOLDOWN_PERIOD = 30000; // 30 seconds
@@ -108,15 +108,6 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // Rate limit WebSocket connections by IP
-  const ip = req.socket.remoteAddress;
-  const connectionCount = connectionsPerIp.get(ip) || 0;
-  if (connectionCount >= MAX_CONNECTIONS_PER_IP) {
-    ws.close(1008, 'Too many connections from this IP');
-    return;
-  }
-  connectionsPerIp.set(ip, connectionCount + 1);
-
   // Validate token in WebSocket URL
   const urlParams = new URLSearchParams(req.url.split('?')[1]);
   const token = urlParams.get('token');
@@ -124,6 +115,17 @@ wss.on('connection', (ws, req) => {
     ws.close(1008, 'Unauthorized: Invalid token');
     return;
   }
+
+  // Rate limit WebSocket connections by token
+  const ip = req.ip; // Log IP for debugging
+  console.log(`WebSocket connection attempt with token: ${token}, IP: ${ip}`);
+  const connectionCount = connectionsPerToken.get(token) || 0;
+  if (connectionCount >= MAX_CONNECTIONS_PER_TOKEN) {
+    console.log(`Too many WebSocket connections for token: ${token}`);
+    ws.close(1008, 'Too many connections for this user');
+    return;
+  }
+  connectionsPerToken.set(token, connectionCount + 1);
 
   // Store client with token, queue, and last sent time
   clients.set(ws, {
@@ -154,7 +156,7 @@ wss.on('connection', (ws, req) => {
         const nextNotification = clientData.queue.shift();
         ws.send(JSON.stringify(nextNotification));
         clientData.lastSentTime = Date.now();
-        console.log(`Sent queued notification to client:`, nextNotification);
+        console.log(`Sent queued notification to client with token: ${token}`, nextNotification);
       } else {
         // No notifications in queue
         ws.send(JSON.stringify({ type: 'noNotifications' }));
@@ -164,17 +166,19 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     clients.delete(ws);
-    const newCount = (connectionsPerIp.get(ip) || 1) - 1;
+    const newCount = (connectionsPerToken.get(token) || 1) - 1;
     if (newCount <= 0) {
-      connectionsPerIp.delete(ip);
+      connectionsPerToken.delete(token);
     } else {
-      connectionsPerIp.set(ip, newCount);
+      connectionsPerToken.set(token, newCount);
     }
+    console.log(`WebSocket disconnected for token: ${token}, IP: ${ip}, remaining connections: ${newCount}`);
   });
 });
 
 // Webhook endpoint to receive sale data
 app.post('/webhook', validateWebhookToken, (req, res) => {
+  console.log(`Webhook request from IP: ${req.ip}`);
   const { type, bdeName, product, managerName, message, email } = req.body;
 
   if (!type) {
@@ -239,12 +243,13 @@ app.post('/webhook', validateWebhookToken, (req, res) => {
 
 // Ping endpoint to keep Render awake
 app.get('/ping', (req, res) => {
+  console.log(`Ping request from IP: ${req.ip}`);
   res.status(200).json({ status: 'alive' });
 });
 
 // Request OTP
 app.post('/request-otp', (req, res, next) => {
-  // Allow first-time OTP request without a token
+  console.log(`Request-OTP from IP: ${req.ip}`);
   const authHeader = req.headers['authorization'];
   if (authHeader && authHeader.startsWith('Bearer ')) {
     validateToken(req, res, next);
