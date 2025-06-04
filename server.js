@@ -5,7 +5,7 @@ const WebSocket = require('ws');
 const sendgridMail = require('@sendgrid/mail');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { v4: uuidv4 } = require('uuid');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 
@@ -34,6 +34,13 @@ if (!WEBHOOK_TOKEN) {
   process.exit(1);
 }
 
+// Configure JWT secret from environment
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('JWT_SECRET environment variable is not set');
+  process.exit(1);
+}
+
 // Configure SendGrid using environment variable
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 if (!SENDGRID_API_KEY) {
@@ -58,6 +65,7 @@ const lastPingTime = new Map(); // Maps token to last ping timestamp
 const MAX_CONNECTIONS_PER_TOKEN = 1; // Limit to 1 connection per user token
 const MIN_CONNECTION_INTERVAL = 30000; // Minimum interval between connections (30 seconds)
 const MIN_PING_INTERVAL = 30000; // Minimum interval between pings (30 seconds)
+const TOKEN_EXPIRY_DAYS = 30; // Token expiry in days (matches client-side authExpiryDays)
 
 // Cooldown period (in milliseconds)
 const COOLDOWN_PERIOD = 30000; // 30 seconds
@@ -69,7 +77,7 @@ const validateToken = (req, res, next) => {
     return res.status(401).json({ error: 'Unauthorized: Missing or invalid Bearer token' });
   }
   const token = authHeader.split(' ')[1];
-  if (!token || !validateTokenFormat(token)) {
+  if (!token) {
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
   req.authToken = token;
@@ -89,17 +97,23 @@ const validateWebhookToken = (req, res, next) => {
   next();
 };
 
-// Validate token format (UUID)
-function validateTokenFormat(token) {
-  return token && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(token);
-}
-
 // Store OTPs temporarily (in-memory, expires in 5 minutes)
 const otps = new Map();
 
 // Generate 6-digit OTP
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// Validate JWT token and extract email
+function validateJwtToken(token) {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    return { email: decoded.email, expiry: decoded.exp * 1000 }; // exp is in seconds, convert to milliseconds
+  } catch (error) {
+    console.error('JWT validation error:', error.message);
+    return null;
+  }
 }
 
 // WebSocket connection handling
@@ -114,8 +128,15 @@ wss.on('connection', (ws, req) => {
   // Validate token in WebSocket URL
   const urlParams = new URLSearchParams(req.url.split('?')[1]);
   const token = urlParams.get('token');
-  if (!token || !validateTokenFormat(token)) {
-    ws.close(1008, 'Unauthorized: Invalid token');
+  if (!token) {
+    ws.close(1008, 'Unauthorized: Missing token');
+    return;
+  }
+
+  // Validate JWT token
+  const tokenData = validateJwtToken(token);
+  if (!tokenData || Date.now() > tokenData.expiry) {
+    ws.close(1008, 'Unauthorized: Invalid or expired token');
     return;
   }
 
@@ -145,6 +166,7 @@ wss.on('connection', (ws, req) => {
   connectionsPerToken.set(token, ws);
   clients.set(ws, {
     token,
+    email: tokenData.email, // Associate email with the connection
     queue: [], // Queue for pending notifications
     lastSentTime: 0 // Timestamp of the last sent notification
   });
@@ -156,7 +178,7 @@ wss.on('connection', (ws, req) => {
       const lastPing = lastPingTime.get(token) || 0;
       const now = Date.now();
       if (now - lastPing < MIN_PING_INTERVAL) {
-        console.log(`Ping received too soon for token: ${token}. Ignoring.`);
+        // Silently ignore excessive pings to reduce log noise
         return;
       }
       lastPingTime.set(token, now);
@@ -242,17 +264,23 @@ app.post('/webhook', validateWebhookToken, (req, res) => {
 
   clients.forEach((clientData, client) => {
     if (client.readyState === WebSocket.OPEN) {
+      // For private messages, ensure the email matches
+      if (saleData.type === 'private' && clientData.email !== saleData.email) {
+        console.log(`Skipping private message for client with token: ${clientData.token} (email mismatch: ${clientData.email} vs ${saleData.email})`);
+        return;
+      }
+
       const currentTime = Date.now();
       // Check if the client is in cooldown
       if (currentTime - clientData.lastSentTime < COOLDOWN_PERIOD) {
         // Client is in cooldown, queue the notification
         clientData.queue.push(saleData);
-        console.log(`Notification queued for client:`, saleData);
+        console.log(`Notification queued for client with token: ${clientData.token}`, saleData);
       } else {
         // Client is not in cooldown, send immediately
         client.send(JSON.stringify(saleData));
         clientData.lastSentTime = currentTime;
-        console.log(`Notification sent to client:`, saleData);
+        console.log(`Notification sent to client with token: ${clientData.token}`, saleData);
       }
     }
   });
@@ -321,7 +349,12 @@ app.post('/verify-otp', (req, res, next) => {
   }
 
   otps.delete(email);
-  const token = uuidv4();
+  // Generate a JWT token with email and expiry
+  const token = jwt.sign(
+    { email },
+    JWT_SECRET,
+    { expiresIn: `${TOKEN_EXPIRY_DAYS}d` } // Expiry in days
+  );
   console.log(`OTP verified for ${email}, token: ${token}`);
   res.status(200).json({ message: 'OTP verified successfully', token, email });
 });
