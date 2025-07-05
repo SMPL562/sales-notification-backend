@@ -13,7 +13,7 @@ const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
 
-// Enhanced Memory Management Classes (same as before)
+// Enhanced Memory Management Classes (keep same as before)
 class LRUCache {
   constructor(maxSize = 1000) {
     this.maxSize = maxSize;
@@ -269,16 +269,23 @@ const limiter = rateLimit({
 app.use('/request-otp', limiter);
 app.use('/verify-otp', limiter);
 
-// Constants
+// Constants - RELAXED RATE LIMITS
 const processedMessages = new Set();
 const MAX_CONNECTIONS_PER_TOKEN = 1;
-const MIN_CONNECTION_INTERVAL = 30000;
+const MIN_CONNECTION_INTERVAL = 5000; // Reduced from 30000 to 5000 (5 seconds)
 const MIN_PING_INTERVAL = 30000;
 const TOKEN_EXPIRY_DAYS = 30;
 const COOLDOWN_PERIOD = 30000;
 
 // Express middleware
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Set proper charset
+app.use((req, res, next) => {
+  res.charset = 'utf-8';
+  next();
+});
 
 // Middleware functions
 const validateToken = (req, res, next) => {
@@ -321,7 +328,7 @@ function validateJwtToken(token) {
   }
 }
 
-// Create WebSocket server with proper error handling
+// Create WebSocket server with relaxed rate limiting
 const wss = new WebSocket.Server({ 
   server,
   path: '/ws',
@@ -350,11 +357,11 @@ const wss = new WebSocket.Server({
         return false;
       }
 
-      // Check connection throttling
+      // RELAXED connection throttling - only check if there's a very recent connection
       const lastConnTime = lastConnectionTime.get(token) || 0;
       const currentTime = Date.now();
       if (currentTime - lastConnTime < MIN_CONNECTION_INTERVAL) {
-        console.log('WebSocket connection rejected: Too frequent connections');
+        console.log(`WebSocket connection rejected: Too frequent connections (${currentTime - lastConnTime}ms ago)`);
         return false;
       }
 
@@ -432,7 +439,7 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-                    if (clientData.queue.length > 0) {
+          if (clientData.queue.length > 0) {
             const nextNotification = clientData.queue.shift();
             ws.send(JSON.stringify(nextNotification));
             clientData.lastSentTime = Date.now();
@@ -681,7 +688,7 @@ app.post('/webhook', validateWebhookToken, (req, res) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
   const memUsage = process.memoryUsage();
-  const isHealthy = memUsage.heapUsed < 400 * 1024 * 1024; // 400MB threshold
+  const isHealthy = memUsage.heapUsed < 400 * 1024 * 1024;
   
   res.status(isHealthy ? 200 : 503).json({
     status: isHealthy ? 'healthy' : 'unhealthy',
@@ -710,22 +717,18 @@ app.use('*', (req, res) => {
 const gracefulShutdown = async () => {
   console.log('Received shutdown signal, closing connections...');
   
-  // Close all WebSocket connections
   wss.clients.forEach(ws => {
     ws.close(1000, 'Server shutdown');
   });
   
-  // Close WebSocket server
   wss.close(() => {
     console.log('WebSocket server closed');
   });
   
-  // Save persistent data
   if (persistentTokens) {
     await persistentTokens.saveToFile();
   }
   
-  // Close HTTP server
   server.close(() => {
     console.log('HTTP server closed');
     process.exit(0);
@@ -735,7 +738,6 @@ const gracefulShutdown = async () => {
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
 
-// Memory pressure handling
 process.on('warning', (warning) => {
   if (warning.name === 'MaxListenersExceededWarning') {
     console.warn('MaxListenersExceededWarning detected, cleaning up...');
@@ -743,12 +745,10 @@ process.on('warning', (warning) => {
   }
 });
 
-// Unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Start the server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
