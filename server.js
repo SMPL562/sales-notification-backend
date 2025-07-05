@@ -52,6 +52,11 @@ class LRUCache {
     return this.cache.keys();
   }
 
+  // ADD THIS METHOD:
+  entries() {
+    return this.cache.entries();
+  }
+
   clear() {
     this.cache.clear();
   }
