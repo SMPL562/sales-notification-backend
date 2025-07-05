@@ -7,15 +7,13 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const fs = require('fs').promises;
+const url = require('url');
 
 const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
 
-app.use(express.json());
-
-// Enhanced Memory Management Classes
+// Enhanced Memory Management Classes (same as before)
 class LRUCache {
   constructor(maxSize = 1000) {
     this.maxSize = maxSize;
@@ -198,7 +196,7 @@ class MemoryManager {
       const memUsage = process.memoryUsage();
       const memUsageMB = Math.round(memUsage.heapUsed / 1024 / 1024);
       
-      if (memUsageMB > 200) { // 200MB threshold for free tier
+      if (memUsageMB > 200) {
         console.warn(`High memory usage: ${memUsageMB}MB`);
         this.triggerCleanup();
       }
@@ -279,7 +277,10 @@ const MIN_PING_INTERVAL = 30000;
 const TOKEN_EXPIRY_DAYS = 30;
 const COOLDOWN_PERIOD = 30000;
 
-// Middleware
+// Express middleware
+app.use(express.json());
+
+// Middleware functions
 const validateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -320,113 +321,174 @@ function validateJwtToken(token) {
   }
 }
 
+// Create WebSocket server with proper error handling
+const wss = new WebSocket.Server({ 
+  server,
+  path: '/ws',
+  verifyClient: (info) => {
+    try {
+      // Verify origin
+      const origin = info.origin;
+      if (origin !== `chrome-extension://${EXTENSION_ID}`) {
+        console.log('WebSocket connection rejected: Invalid origin', origin);
+        return false;
+      }
+
+      // Parse URL to get token
+      const parsedUrl = url.parse(info.req.url, true);
+      const token = parsedUrl.query.token;
+      
+      if (!token) {
+        console.log('WebSocket connection rejected: Missing token');
+        return false;
+      }
+
+      // Validate JWT token
+      const tokenData = validateJwtToken(token);
+      if (!tokenData || Date.now() > tokenData.expiry) {
+        console.log('WebSocket connection rejected: Invalid or expired token');
+        return false;
+      }
+
+      // Check connection throttling
+      const lastConnTime = lastConnectionTime.get(token) || 0;
+      const currentTime = Date.now();
+      if (currentTime - lastConnTime < MIN_CONNECTION_INTERVAL) {
+        console.log('WebSocket connection rejected: Too frequent connections');
+        return false;
+      }
+
+      // Store token data for later use
+      info.req.tokenData = tokenData;
+      info.req.token = token;
+      
+      return true;
+    } catch (error) {
+      console.error('Error in WebSocket verifyClient:', error);
+      return false;
+    }
+  }
+});
+
 // WebSocket connection handling
 wss.on('connection', (ws, req) => {
-  const origin = req.headers.origin;
-  if (origin !== `chrome-extension://${EXTENSION_ID}`) {
-    ws.close(1008, 'Unauthorized Origin');
-    return;
-  }
-
-  const urlParams = new URLSearchParams(req.url.split('?')[1]);
-  const token = urlParams.get('token');
-  if (!token) {
-    ws.close(1008, 'Unauthorized: Missing token');
-    return;
-  }
-
-  const tokenData = validateJwtToken(token);
-  if (!tokenData || Date.now() > tokenData.expiry) {
-    ws.close(1008, 'Unauthorized: Invalid or expired token');
+  const token = req.token;
+  const tokenData = req.tokenData;
+  
+  if (!token || !tokenData) {
+    ws.close(1008, 'Invalid connection data');
     return;
   }
 
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  console.log(`WebSocket connection attempt with token: ${token.substring(0, 10)}..., IP: ${ip}`);
+  console.log(`WebSocket connected: ${tokenData.email}, IP: ${ip}`);
 
-  const lastConnTime = lastConnectionTime.get(token) || 0;
-  const currentTime = Date.now();
-  if (currentTime - lastConnTime < MIN_CONNECTION_INTERVAL) {
-    console.log(`Connection attempt too soon for token. Ignoring.`);
-    ws.close(1008, 'Connection attempt too soon');
-    return;
-  }
-
+  // Close existing connection if any
   const existingWs = connectionsPerToken.get(token);
-  if (existingWs) {
-    console.log(`Existing connection found for token. Closing old connection.`);
+  if (existingWs && existingWs.readyState === WebSocket.OPEN) {
+    console.log('Closing existing connection for token');
     existingWs.close(1000, 'Replaced by new connection');
   }
 
+  // Update connection tracking
+  const currentTime = Date.now();
   lastConnectionTime.set(token, currentTime);
   connectionsPerToken.set(token, ws);
+  
+  // Add client to manager
   clientManager.addClient(ws, {
     token,
     email: tokenData.email,
     queue: [],
     lastSentTime: 0,
-    popupsEnabled: true // Default to enabled
+    popupsEnabled: true
   });
 
+  // Handle incoming messages
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
       
-      if (data.type === 'ping') {
-        const lastPing = lastPingTime.get(token) || 0;
-        const now = Date.now();
-        if (now - lastPing < MIN_PING_INTERVAL) {
-          return;
-        }
-        lastPingTime.set(token, now);
-        ws.send(JSON.stringify({ type: 'pong' }));
-      } else if (data.type === 'requestNextNotification') {
-        const clientData = clientManager.getClient(ws);
-        if (!clientData) return;
+      switch (data.type) {
+        case 'ping':
+          const lastPing = lastPingTime.get(token) || 0;
+          const now = Date.now();
+          if (now - lastPing >= MIN_PING_INTERVAL) {
+            lastPingTime.set(token, now);
+            ws.send(JSON.stringify({ type: 'pong' }));
+          }
+          break;
+          
+        case 'requestNextNotification':
+          const clientData = clientManager.getClient(ws);
+          if (!clientData) return;
 
-        const currentTime = Date.now();
-        if (currentTime - clientData.lastSentTime < COOLDOWN_PERIOD) {
-          ws.send(JSON.stringify({ 
-            type: 'wait', 
-            remaining: COOLDOWN_PERIOD - (currentTime - clientData.lastSentTime) 
-          }));
-          return;
-        }
+          const currentTime = Date.now();
+          if (currentTime - clientData.lastSentTime < COOLDOWN_PERIOD) {
+            ws.send(JSON.stringify({ 
+              type: 'wait', 
+              remaining: COOLDOWN_PERIOD - (currentTime - clientData.lastSentTime) 
+            }));
+            return;
+          }
 
-        if (clientData.queue.length > 0) {
-          const nextNotification = clientData.queue.shift();
-          ws.send(JSON.stringify(nextNotification));
-          clientData.lastSentTime = Date.now();
-          console.log(`Sent queued notification to client`);
-        } else {
-          ws.send(JSON.stringify({ type: 'noNotifications' }));
-        }
-      } else if (data.type === 'updatePopupSettings') {
-        const clientData = clientManager.getClient(ws);
-        if (clientData) {
-          clientData.popupsEnabled = data.popupsEnabled;
-          console.log(`Updated popup settings for client: ${data.popupsEnabled}`);
-        }
-      } else if (data.type === 'keepAlive') {
-        // Handle keep-alive from service worker
-        ws.send(JSON.stringify({ type: 'keepAliveResponse' }));
+                    if (clientData.queue.length > 0) {
+            const nextNotification = clientData.queue.shift();
+            ws.send(JSON.stringify(nextNotification));
+            clientData.lastSentTime = Date.now();
+            console.log('Sent queued notification to client');
+          } else {
+            ws.send(JSON.stringify({ type: 'noNotifications' }));
+          }
+          break;
+          
+        case 'updatePopupSettings':
+          const client = clientManager.getClient(ws);
+          if (client) {
+            client.popupsEnabled = data.popupsEnabled;
+            console.log(`Updated popup settings for client: ${data.popupsEnabled}`);
+          }
+          break;
+          
+        case 'keepAlive':
+          ws.send(JSON.stringify({ type: 'keepAliveResponse' }));
+          break;
+          
+        default:
+          console.log('Unknown message type:', data.type);
       }
     } catch (error) {
       console.error('Error parsing WebSocket message:', error);
     }
   });
 
-  ws.on('close', () => {
+  // Handle connection close
+  ws.on('close', (code, reason) => {
+    console.log(`WebSocket disconnected: ${tokenData.email}, Code: ${code}, Reason: ${reason}`);
+    
+    // Cleanup
     clientManager.removeClient(ws);
     if (connectionsPerToken.get(token) === ws) {
       connectionsPerToken.delete(token);
     }
-    console.log(`WebSocket disconnected for token`);
   });
 
+  // Handle WebSocket errors
   ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
+    console.error('WebSocket error for', tokenData.email, ':', error);
   });
+
+  // Send welcome message
+  ws.send(JSON.stringify({ 
+    type: 'connected', 
+    message: 'WebSocket connection established',
+    email: tokenData.email
+  }));
+});
+
+// Handle WebSocket server errors
+wss.on('error', (error) => {
+  console.error('WebSocket Server Error:', error);
 });
 
 // API Endpoints
@@ -522,7 +584,6 @@ app.post('/verify-otp', (req, res, next) => {
     { expiresIn: `${TOKEN_EXPIRY_DAYS}d` }
   );
   
-  // Store token for persistence
   persistentTokens.set(token, { email, timestamp: Date.now() });
   
   console.log(`OTP verified for ${email}`);
@@ -597,10 +658,14 @@ app.post('/webhook', validateWebhookToken, (req, res) => {
         queuedCount++;
         console.log(`Notification queued for client`);
       } else {
-        client.send(JSON.stringify(saleData));
-        clientData.lastSentTime = currentTime;
-        sentCount++;
-        console.log(`Notification sent to client`);
+        try {
+          client.send(JSON.stringify(saleData));
+          clientData.lastSentTime = currentTime;
+          sentCount++;
+          console.log(`Notification sent to client`);
+        } catch (error) {
+          console.error('Error sending notification:', error);
+        }
       }
     }
   });
@@ -622,7 +687,11 @@ app.get('/health', (req, res) => {
     status: isHealthy ? 'healthy' : 'unhealthy',
     memory: Math.round(memUsage.heapUsed / 1024 / 1024) + 'MB',
     connections: connectionsPerToken.size,
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    websocket: {
+      clients: wss.clients.size,
+      readyState: 'OPEN'
+    }
   });
 });
 
@@ -638,33 +707,33 @@ app.use('*', (req, res) => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('Received SIGTERM, closing connections...');
+const gracefulShutdown = async () => {
+  console.log('Received shutdown signal, closing connections...');
   
+  // Close all WebSocket connections
   wss.clients.forEach(ws => {
     ws.close(1000, 'Server shutdown');
   });
   
+  // Close WebSocket server
+  wss.close(() => {
+    console.log('WebSocket server closed');
+  });
+  
+  // Save persistent data
   if (persistentTokens) {
     await persistentTokens.saveToFile();
   }
   
-  process.exit(0);
-});
+  // Close HTTP server
+  server.close(() => {
+    console.log('HTTP server closed');
+    process.exit(0);
+  });
+};
 
-process.on('SIGINT', async () => {
-  console.log('Received SIGINT, closing connections...');
-  
-  wss.clients.forEach(ws => {
-    ws.close(1000, 'Server shutdown');
-  });
-  
-  if (persistentTokens) {
-    await persistentTokens.saveToFile();
-  }
-  
-  process.exit(0);
-});
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 // Memory pressure handling
 process.on('warning', (warning) => {
@@ -674,10 +743,17 @@ process.on('warning', (warning) => {
   }
 });
 
+// Unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // Start the server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Memory limit: 256MB`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`WebSocket path: /ws`);
+  console.log(`Extension ID: ${EXTENSION_ID}`);
 });
