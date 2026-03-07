@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Runtime data
+tokens.json
+webhook_trigger.log
+webhook_results.json
+
+# Claude Code
+.claude/settings.local.json
+.claude/memory.db
+.claude/state/
+.claude/sessions/
+.mcp.json
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.template
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
