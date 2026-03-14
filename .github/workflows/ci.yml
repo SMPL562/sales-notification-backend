@@ -1,25 +1,84 @@
+# =============================================
+# Sales Notification Backend - CI Pipeline
+# =============================================
+# Syntax Check → Security Audit → Env Validation → Summary
+# =============================================
+
 name: CI
 
 on:
   push:
     branches: [main, master]
+    paths-ignore: ['*.md', 'docs/**', '.claude/**', '.vscode/**']
   pull_request:
     branches: [main, master]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint:
-    name: Lint
+  ci:
+    name: CI Quality Gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
+
       - name: Install dependencies
         run: npm install --no-audit --prefer-offline 2>/dev/null || npm install --legacy-peer-deps --no-audit
+
       - name: Syntax check
-        run: node --check server.js
+        id: syntax
+        run: |
+          ERRORS=0
+          for f in *.js; do
+            if ! node --check "$f" 2>/dev/null; then
+              echo "::error file=$f::Syntax error in $f"
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "✅ $f"
+            fi
+          done
+          if [ $ERRORS -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: Security audit (npm)
+        id: security
+        continue-on-error: true
+        run: npm audit --audit-level=critical 2>&1 | tail -20
+
+      - name: Validate environment
+        id: envcheck
+        run: |
+          if [ -f ".env.example" ]; then
+            echo "✅ .env.example found"
+            echo "Required variables:"
+            grep -v '^#' .env.example | grep '=' | cut -d'=' -f1 | while read var; do
+              echo "  📋 $var"
+            done
+          else
+            echo "::warning::Missing .env.example"
+          fi
+
+      - name: CI Summary
+        if: always()
+        run: |
+          echo "## CI Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Syntax Check | ${{ steps.syntax.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Audit | ${{ steps.security.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Env Validation | ${{ steps.envcheck.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
