@@ -4,7 +4,6 @@
   "description": "Backend for Sales Notification Chrome Extension",
   "main": "server.js",
   "scripts": {
-    "prepare": "skills-npm",
     "start": "node --max-old-space-size=256 server.js",
     "dev": "nodemon --max-old-space-size=256 server.js"
   },
