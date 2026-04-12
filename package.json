@@ -15,7 +15,7 @@
     "express-rate-limit": "^6.7.0",
     "jsonwebtoken": "^9.0.0",
     "uuid": "^9.0.0",
-    "ws": "^8.13.0"
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.8",
